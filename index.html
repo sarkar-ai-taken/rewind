@@ -1,0 +1,490 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Rewind — point your camera, swipe back in time</title>
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+<meta name="theme-color" content="#000">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<style>
+  :root {
+    --fg: #fff; --dim: rgba(255,255,255,.65); --bg: #000;
+    --accent: #ffcf5c; --pill: rgba(0,0,0,.55); --stroke: rgba(255,255,255,.18);
+    --sat: env(safe-area-inset-top, 0px); --sab: env(safe-area-inset-bottom, 0px);
+  }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--fg);
+    font: 15px/1.4 -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", Roboto, sans-serif;
+    overflow: hidden; touch-action: none; user-select: none; -webkit-user-select: none; }
+
+  #stage { position: fixed; inset: 0; background: #000; }
+  #cam { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+  #cam.mirror { transform: scaleX(-1); }
+
+  /* Photo layers — two for crossfade */
+  .layer { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover;
+    opacity: 0; transition: opacity .35s ease, transform .35s ease; background: #000; }
+  .layer.show { opacity: 1; }
+  .layer.old { filter: sepia(.08) contrast(1.02); }
+
+  /* Grain/vignette over historical photos */
+  #vignette { position: absolute; inset: 0; pointer-events: none; opacity: 0; transition: opacity .35s;
+    background: radial-gradient(ellipse at center, transparent 55%, rgba(0,0,0,.55) 100%); }
+  #vignette.show { opacity: 1; }
+
+  /* Top HUD */
+  #top { position: absolute; left: 0; right: 0; top: 0; padding: calc(var(--sat) + 12px) 14px 10px;
+    display: flex; align-items: flex-start; justify-content: space-between; gap: 10px;
+    background: linear-gradient(rgba(0,0,0,.6), transparent); pointer-events: none; }
+  #top > * { pointer-events: auto; }
+  #place { min-width: 0; }
+  #place .name { font-weight: 600; font-size: 16px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 62vw; }
+  #place .sub { color: var(--dim); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 62vw; }
+  #compass { width: 44px; height: 44px; border-radius: 50%; border: 1px solid var(--stroke); background: var(--pill);
+    display: grid; place-items: center; position: relative; flex: none; }
+  #needle { width: 2px; height: 16px; background: var(--accent); border-radius: 2px; transform-origin: 50% 100%;
+    position: absolute; left: calc(50% - 1px); top: 6px; transition: transform .15s; }
+  #compass small { position: absolute; bottom: 4px; font-size: 9px; color: var(--dim); }
+  #compass.off #needle { background: rgba(255,255,255,.3); }
+
+  /* Year badge */
+  #year { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%);
+    font-size: clamp(64px, 18vw, 120px); font-weight: 800; letter-spacing: -.04em; line-height: 1;
+    color: #fff; text-shadow: 0 2px 30px rgba(0,0,0,.6); opacity: 0; pointer-events: none;
+    transition: opacity .25s, transform .25s; }
+  #year.pop { opacity: 1; transform: translate(-50%, -50%) scale(1); }
+  #year.fade { opacity: .18; transform: translate(-50%, -62%) scale(.72); }
+  #year .ca { font-size: .28em; font-weight: 500; color: var(--accent); display: block; text-align: center; letter-spacing: 0; }
+
+  /* Bottom */
+  #bottom { position: absolute; left: 0; right: 0; bottom: 0; padding: 12px 14px calc(var(--sab) + 14px);
+    background: linear-gradient(transparent, rgba(0,0,0,.75)); }
+  #caption { font-size: 13px; color: var(--dim); min-height: 36px; max-height: 54px; overflow: hidden;
+    display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; margin-bottom: 10px; }
+  #caption b { color: #fff; font-weight: 600; }
+  #caption a { color: var(--accent); text-decoration: none; }
+
+  /* Timeline */
+  #timeline { position: relative; height: 44px; margin: 0 2px 8px; }
+  #track { position: absolute; left: 0; right: 0; top: 50%; height: 2px; background: rgba(255,255,255,.25); }
+  .tick { position: absolute; top: 50%; width: 8px; height: 8px; border-radius: 50%; background: rgba(255,255,255,.55);
+    transform: translate(-50%, -50%); transition: transform .2s, background .2s; }
+  .tick.cur { background: var(--accent); transform: translate(-50%, -50%) scale(1.9); box-shadow: 0 0 0 4px rgba(255,207,92,.25); }
+  .tick.now { background: #fff; border-radius: 2px; width: 3px; height: 14px; }
+  .tlabel { position: absolute; top: 0; transform: translateX(-50%); font-size: 10px; color: var(--dim); }
+  .tlabel.r { transform: translateX(-100%); }
+
+  #controls { display: flex; gap: 8px; align-items: center; justify-content: space-between; }
+  .pills { display: flex; gap: 6px; flex-wrap: wrap; }
+  .pill { background: var(--pill); border: 1px solid var(--stroke); color: #fff; border-radius: 999px;
+    padding: 7px 12px; font-size: 13px; cursor: pointer; backdrop-filter: blur(8px); }
+  .pill.on { background: var(--accent); color: #000; border-color: var(--accent); font-weight: 600; }
+  .pill:disabled { opacity: .4; }
+  #hint { text-align: center; color: var(--dim); font-size: 12px; margin-top: 8px; }
+  #hint b { color: #fff; }
+
+  /* Nav arrows for desktop */
+  .arrow { position: absolute; top: 50%; transform: translateY(-50%); width: 44px; height: 64px;
+    display: grid; place-items: center; color: #fff; opacity: .5; cursor: pointer; font-size: 28px; }
+  .arrow:hover { opacity: 1; }
+  #prev { left: 2px; } #next { right: 2px; }
+  @media (pointer: coarse) { .arrow { display: none; } }
+
+  /* Toast / status */
+  #toast { position: absolute; left: 50%; bottom: calc(var(--sab) + 190px); transform: translateX(-50%);
+    background: var(--pill); border: 1px solid var(--stroke); border-radius: 12px; padding: 8px 14px;
+    font-size: 13px; opacity: 0; transition: opacity .25s; pointer-events: none; max-width: 86vw; text-align: center; backdrop-filter: blur(8px); }
+  #toast.show { opacity: 1; }
+
+  /* Start / setup sheet */
+  #sheet { position: absolute; inset: 0; display: flex; align-items: flex-end; justify-content: center;
+    background: rgba(0,0,0,.6); backdrop-filter: blur(6px); z-index: 10; }
+  #sheet.hide { display: none; }
+  .card { width: 100%; max-width: 520px; background: #141414; border-radius: 22px 22px 0 0; padding: 22px 20px calc(var(--sab) + 22px);
+    border-top: 1px solid var(--stroke); }
+  .card h1 { margin: 0 0 4px; font-size: 24px; letter-spacing: -.02em; }
+  .card p { margin: 0 0 16px; color: var(--dim); }
+  .btn { display: block; width: 100%; padding: 14px; border-radius: 14px; border: 0; font-size: 16px; font-weight: 600;
+    cursor: pointer; margin-bottom: 10px; }
+  .btn.primary { background: var(--accent); color: #000; }
+  .btn.ghost { background: #222; color: #fff; border: 1px solid var(--stroke); }
+  .row { display: flex; gap: 8px; }
+  .row input { flex: 1; padding: 13px 14px; border-radius: 14px; border: 1px solid var(--stroke); background: #0d0d0d; color: #fff; font-size: 15px; min-width: 0; }
+  .row .btn { width: auto; margin: 0; padding: 13px 16px; }
+  .demos { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 4px; }
+  .demos .pill { background: #222; }
+  .fine { font-size: 12px; color: rgba(255,255,255,.45); margin-top: 12px; }
+
+  #spinner { position: absolute; left: 50%; top: 50%; width: 36px; height: 36px; margin: -18px; border-radius: 50%;
+    border: 3px solid rgba(255,255,255,.2); border-top-color: var(--accent); animation: spin .8s linear infinite; display: none; }
+  #spinner.show { display: block; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  #empty { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); text-align: center; color: var(--dim);
+    display: none; max-width: 80vw; }
+  #empty.show { display: block; }
+  #empty b { color: #fff; display: block; font-size: 18px; margin-bottom: 6px; }
+</style>
+</head>
+<body>
+<div id="stage">
+  <video id="cam" autoplay playsinline muted></video>
+  <img id="layerA" class="layer old" alt="">
+  <img id="layerB" class="layer old" alt="">
+  <div id="vignette"></div>
+
+  <div id="year"></div>
+  <div id="spinner"></div>
+  <div id="empty"><b>Nothing archived here yet</b>Try a wider radius, turn off Aim, or walk toward a landmark.</div>
+
+  <div id="top">
+    <div id="place">
+      <div class="name">Locating…</div>
+      <div class="sub">—</div>
+    </div>
+    <div id="compass" class="off" title="Tap to enable compass">
+      <div id="needle"></div><small>N</small>
+    </div>
+  </div>
+
+  <div class="arrow" id="prev" title="Back in time (←)">‹</div>
+  <div class="arrow" id="next" title="Forward (→)">›</div>
+
+  <div id="toast"></div>
+
+  <div id="bottom">
+    <div id="caption">Point your camera at a place.</div>
+    <div id="timeline"><div id="track"></div></div>
+    <div id="controls">
+      <div class="pills" id="radii">
+        <button class="pill" data-r="150">150 m</button>
+        <button class="pill on" data-r="400">400 m</button>
+        <button class="pill" data-r="1000">1 km</button>
+        <button class="pill" data-r="3000">3 km</button>
+      </div>
+      <div class="pills">
+        <button class="pill" id="aim" title="Only show photos in the direction you're pointing">Aim</button>
+        <button class="pill" id="relocate" title="Refresh location">⟳</button>
+      </div>
+    </div>
+    <div id="hint">Swipe <b>left</b> to go back in time · swipe <b>right</b> to return</div>
+  </div>
+
+  <div id="sheet">
+    <div class="card">
+      <h1>Rewind</h1>
+      <p>Point your camera at any place and swipe left to see what it looked like through the years. Photos come from Wikimedia Commons' geo-tagged archive.</p>
+      <button class="btn primary" id="start">Start with camera &amp; location</button>
+      <div class="row">
+        <input id="q" placeholder="…or type a place (e.g. Pike Place Market)">
+        <button class="btn ghost" id="go">Go</button>
+      </div>
+      <div class="demos">
+        <button class="pill" data-ll="47.6097,-122.3422,Pike Place Market">Pike Place Market</button>
+        <button class="pill" data-ll="40.7580,-73.9855,Times Square">Times Square</button>
+        <button class="pill" data-ll="48.8584,2.2945,Eiffel Tower">Eiffel Tower</button>
+        <button class="pill" data-ll="51.5007,-0.1246,Westminster">Westminster</button>
+      </div>
+      <div class="fine">Camera and compass need HTTPS and a phone. On a laptop, use a demo location — the live view just won't have a camera behind it.</div>
+    </div>
+  </div>
+</div>
+
+<script>
+(() => {
+  // ---------- State ----------
+  const S = {
+    lat: null, lon: null, placeName: '', radius: 400, aim: false, heading: null,
+    photos: [],      // all fetched, sorted newest -> oldest
+    view: [],        // filtered by aim
+    idx: -1,         // -1 = now (live camera); 0..n-1 = view[idx]
+    activeLayer: 'A', stream: null, fetchSeq: 0,
+  };
+  const $ = (id) => document.getElementById(id);
+  const cam = $('cam'), layers = { A: $('layerA'), B: $('layerB') };
+  const yearEl = $('year'), caption = $('caption'), toastEl = $('toast');
+
+  // ---------- Utils ----------
+  let toastT;
+  function toast(msg, ms = 2200) {
+    toastEl.textContent = msg; toastEl.classList.add('show');
+    clearTimeout(toastT); toastT = setTimeout(() => toastEl.classList.remove('show'), ms);
+  }
+  const rad = d => d * Math.PI / 180, deg = r => r * 180 / Math.PI;
+  function bearing(lat1, lon1, lat2, lon2) {
+    const y = Math.sin(rad(lon2 - lon1)) * Math.cos(rad(lat2));
+    const x = Math.cos(rad(lat1)) * Math.sin(rad(lat2)) - Math.sin(rad(lat1)) * Math.cos(rad(lat2)) * Math.cos(rad(lon2 - lon1));
+    return (deg(Math.atan2(y, x)) + 360) % 360;
+  }
+  function distM(lat1, lon1, lat2, lon2) {
+    const R = 6371000, dLat = rad(lat2 - lat1), dLon = rad(lon2 - lon1);
+    const a = Math.sin(dLat / 2) ** 2 + Math.cos(rad(lat1)) * Math.cos(rad(lat2)) * Math.sin(dLon / 2) ** 2;
+    return 2 * R * Math.asin(Math.sqrt(a));
+  }
+  function angDiff(a, b) { const d = Math.abs(a - b) % 360; return d > 180 ? 360 - d : d; }
+  function stripHtml(s) { const d = document.createElement('div'); d.innerHTML = s || ''; return (d.textContent || '').trim(); }
+  function esc(s) { return String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])); }
+
+  // Pull a plausible year from messy metadata. Handles "1908", "circa 1900", "2015-06-12 14:03:22", "between 1900 and 1910".
+  function parseYear(meta, uploadTs) {
+    const src = stripHtml(meta.DateTimeOriginal?.value) || stripHtml(meta.DateTime?.value) || '';
+    const circa = /\b(circa|ca\.?|c\.|about|approx)/i.test(src) || /\?/.test(src);
+    const m = src.match(/\b(1[5-9]\d{2}|20\d{2})\b/);
+    if (m) return { year: +m[1], circa, label: src.slice(0, 40) };
+    if (uploadTs) return { year: +uploadTs.slice(0, 4), circa: true, label: 'upload date' };
+    return null;
+  }
+
+  // ---------- Wikimedia API ----------
+  async function wm(host, params) {
+    const u = new URL(`https://${host}/w/api.php`);
+    Object.entries({ format: 'json', origin: '*', ...params }).forEach(([k, v]) => u.searchParams.set(k, v));
+    const r = await fetch(u.toString());
+    if (!r.ok) throw new Error(`${host} ${r.status}`);
+    return r.json();
+  }
+
+  async function fetchPlaceName(lat, lon) {
+    try {
+      const j = await wm('en.wikipedia.org', { action: 'query', list: 'geosearch', gscoord: `${lat}|${lon}`, gsradius: 400, gslimit: 1 });
+      return j.query?.geosearch?.[0]?.title || '';
+    } catch { return ''; }
+  }
+
+  async function geocode(q) {
+    // 1) exact article coordinates  2) fall back to search -> first hit's coordinates
+    let j = await wm('en.wikipedia.org', { action: 'query', prop: 'coordinates', titles: q, redirects: 1 });
+    let p = Object.values(j.query?.pages || {})[0];
+    if (!p?.coordinates) {
+      j = await wm('en.wikipedia.org', { action: 'query', generator: 'search', gsrsearch: q, gsrlimit: 5, prop: 'coordinates' });
+      p = Object.values(j.query?.pages || {}).find(x => x.coordinates);
+    }
+    if (!p?.coordinates) return null;
+    return { lat: p.coordinates[0].lat, lon: p.coordinates[0].lon, name: p.title };
+  }
+
+  async function fetchPhotos(lat, lon, radius) {
+    const j = await wm('commons.wikimedia.org', {
+      action: 'query', generator: 'geosearch', ggscoord: `${lat}|${lon}`, ggsradius: Math.min(radius, 10000),
+      ggslimit: 50, ggsnamespace: 6, ggsprop: 'type|name',
+      prop: 'imageinfo|coordinates', iiprop: 'url|extmetadata|timestamp|mime', iiurlwidth: Math.min(1600, Math.round(window.innerWidth * devicePixelRatio * 1.2)),
+      iiextmetadatafilter: 'DateTimeOriginal|DateTime|ImageDescription|Artist|LicenseShortName|Credit',
+    });
+    const pages = Object.values(j.query?.pages || {});
+    const out = [];
+    for (const p of pages) {
+      const ii = p.imageinfo?.[0]; if (!ii || !/^image\/(jpeg|png|webp|gif)/.test(ii.mime || '')) continue;
+      const meta = ii.extmetadata || {};
+      const y = parseYear(meta, ii.timestamp); if (!y) continue;
+      const c = p.coordinates?.[0];
+      out.push({
+        title: (p.title || '').replace(/^File:/, '').replace(/\.[a-z]+$/i, '').replace(/_/g, ' '),
+        url: ii.thumburl || ii.url, page: ii.descriptionurl,
+        year: y.year, circa: y.circa, dateLabel: y.label,
+        desc: stripHtml(meta.ImageDescription?.value).slice(0, 220),
+        artist: stripHtml(meta.Artist?.value).slice(0, 60),
+        license: stripHtml(meta.LicenseShortName?.value),
+        lat: c?.lat, lon: c?.lon,
+        dist: c ? distM(lat, lon, c.lat, c.lon) : null,
+        bearing: c ? bearing(lat, lon, c.lat, c.lon) : null,
+      });
+    }
+    // newest first; among same year, nearest first
+    out.sort((a, b) => b.year - a.year || (a.dist ?? 1e9) - (b.dist ?? 1e9));
+    return out;
+  }
+
+  // ---------- Load for a location ----------
+  async function loadLocation(lat, lon, name) {
+    S.lat = lat; S.lon = lon; S.idx = -1;
+    const seq = ++S.fetchSeq;
+    $('place').querySelector('.name').textContent = name || 'Locating…';
+    $('place').querySelector('.sub').textContent = `${lat.toFixed(4)}, ${lon.toFixed(4)} · ${S.radius >= 1000 ? (S.radius / 1000) + ' km' : S.radius + ' m'}`;
+    $('spinner').classList.add('show'); $('empty').classList.remove('show');
+    showNow();
+    try {
+      const [photos, pname] = await Promise.all([fetchPhotos(lat, lon, S.radius), name ? Promise.resolve(name) : fetchPlaceName(lat, lon)]);
+      if (seq !== S.fetchSeq) return;
+      S.placeName = pname || name || 'Unknown place';
+      $('place').querySelector('.name').textContent = S.placeName;
+      S.photos = photos;
+      applyFilter();
+      const yrs = S.view.map(p => p.year);
+      if (yrs.length) toast(`${S.view.length} photos · ${Math.min(...yrs)} → ${Math.max(...yrs)}`);
+      else { $('empty').classList.add('show'); }
+      // preload the first few
+      S.view.slice(0, 4).forEach(p => { const i = new Image(); i.src = p.url; });
+    } catch (e) {
+      console.error(e); toast('Could not reach Wikimedia. Check your connection.', 4000);
+    } finally { if (seq === S.fetchSeq) $('spinner').classList.remove('show'); }
+  }
+
+  function applyFilter() {
+    if (S.aim && S.heading != null) {
+      const cone = S.photos.filter(p => p.bearing == null || angDiff(p.bearing, S.heading) <= 45);
+      S.view = cone;
+    } else S.view = S.photos;
+    if (S.idx >= S.view.length) S.idx = S.view.length - 1;
+    buildTimeline(); render();
+    $('empty').classList.toggle('show', S.view.length === 0 && S.photos !== null && !$('spinner').classList.contains('show'));
+  }
+
+  // ---------- Timeline ----------
+  function buildTimeline() {
+    const tl = $('timeline'); tl.querySelectorAll('.tick,.tlabel').forEach(n => n.remove());
+    const now = new Date().getFullYear();
+    const yrs = S.view.map(p => p.year);
+    const min = yrs.length ? Math.min(...yrs, now - 5) : now - 50;
+    const span = Math.max(1, now - min);
+    const x = y => 2 + 96 * (y - min) / span;
+    const nowTick = document.createElement('div'); nowTick.className = 'tick now'; nowTick.style.left = x(now) + '%'; nowTick.dataset.i = -1; tl.appendChild(nowTick);
+    S.view.forEach((p, i) => { const t = document.createElement('div'); t.className = 'tick'; t.style.left = x(p.year) + '%'; t.dataset.i = i; tl.appendChild(t); });
+    const l1 = document.createElement('div'); l1.className = 'tlabel'; l1.style.left = '2%'; l1.textContent = min; tl.appendChild(l1);
+    const l2 = document.createElement('div'); l2.className = 'tlabel r'; l2.style.left = '98%'; l2.textContent = 'now'; tl.appendChild(l2);
+  }
+  $('timeline').addEventListener('click', e => { const t = e.target.closest('.tick'); if (t) go(+t.dataset.i); });
+
+  // ---------- Render ----------
+  function showNow() {
+    Object.values(layers).forEach(l => l.classList.remove('show'));
+    $('vignette').classList.remove('show');
+    yearEl.className = ''; yearEl.innerHTML = '';
+    caption.innerHTML = S.stream ? `<b>Now</b> · live camera${S.view.length ? ` · ${S.view.length} archived photos nearby` : ''}`
+      : `<b>Now</b> · no camera on this device${S.view.length ? ` · ${S.view.length} archived photos nearby` : ''}`;
+  }
+  function render() {
+    document.querySelectorAll('.tick').forEach(t => t.classList.toggle('cur', +t.dataset.i === S.idx));
+    if (S.idx < 0) return showNow();
+    const p = S.view[S.idx]; if (!p) return showNow();
+    const next = S.activeLayer === 'A' ? 'B' : 'A';
+    const el = layers[next];
+    el.onload = () => {
+      layers[S.activeLayer].classList.remove('show'); el.classList.add('show'); S.activeLayer = next;
+    };
+    if (el.src !== p.url) el.src = p.url; else el.onload();
+    $('vignette').classList.add('show');
+    yearEl.innerHTML = `${p.circa ? '<span class="ca">circa</span>' : ''}${p.year}`;
+    yearEl.className = 'pop'; clearTimeout(render._t); render._t = setTimeout(() => { yearEl.className = 'fade'; }, 900);
+    const bits = [];
+    if (p.dist != null) bits.push(`${Math.round(p.dist)} m away`);
+    if (p.artist) bits.push(p.artist);
+    if (p.license) bits.push(p.license);
+    caption.innerHTML = `<b>${esc(p.title)}</b>${p.desc ? ' — ' + esc(p.desc) : ''}<br>${esc(bits.join(' · '))} · <a href="${esc(p.page)}" target="_blank" rel="noopener">Commons ↗</a>`;
+    // preload neighbours
+    [S.idx + 1, S.idx + 2].forEach(i => { if (S.view[i]) { const im = new Image(); im.src = S.view[i].url; } });
+  }
+  function go(i) {
+    if (!S.view.length) { if (i >= 0) toast('No archived photos here'); return; }
+    S.idx = Math.max(-1, Math.min(S.view.length - 1, i)); render();
+    if (navigator.vibrate) try { navigator.vibrate(8); } catch {}
+  }
+  const back = () => go(S.idx + 1), fwd = () => go(S.idx - 1);
+
+  // ---------- Gestures ----------
+  let px = null, py = null, pt = 0;
+  const stage = $('stage');
+  stage.addEventListener('pointerdown', e => { if (e.target.closest('#bottom,#top,#sheet,.arrow')) return; px = e.clientX; py = e.clientY; pt = Date.now(); });
+  stage.addEventListener('pointerup', e => {
+    if (px == null) return;
+    const dx = e.clientX - px, dy = e.clientY - py, dt = Date.now() - pt; px = null;
+    if (Math.abs(dx) > 40 && Math.abs(dx) > Math.abs(dy) * 1.3 && dt < 800) { dx < 0 ? back() : fwd(); }
+    else if (Math.abs(dx) < 8 && Math.abs(dy) < 8 && dt < 300 && S.idx >= 0) { // tap: peek at live camera
+      Object.values(layers).forEach(l => l.classList.toggle('show', false)); $('vignette').classList.remove('show');
+      setTimeout(() => render(), 900);
+    }
+  });
+  window.addEventListener('keydown', e => { if (e.key === 'ArrowLeft') back(); if (e.key === 'ArrowRight') fwd(); if (e.key === 'Home') go(-1); });
+  $('prev').onclick = back; $('next').onclick = fwd;
+
+  // ---------- Camera ----------
+  async function startCamera() {
+    if (!navigator.mediaDevices?.getUserMedia) return false;
+    try {
+      S.stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: 'environment' }, width: { ideal: 1920 }, height: { ideal: 1080 } }, audio: false });
+      cam.srcObject = S.stream;
+      const track = S.stream.getVideoTracks()[0];
+      cam.classList.toggle('mirror', track.getSettings().facingMode === 'user');
+      return true;
+    } catch (e) { console.warn('camera', e); return false; }
+  }
+
+  // ---------- Location ----------
+  function locate() {
+    return new Promise((res, rej) => {
+      if (!navigator.geolocation) return rej(new Error('no geolocation'));
+      navigator.geolocation.getCurrentPosition(p => res(p.coords), rej, { enableHighAccuracy: true, timeout: 12000, maximumAge: 30000 });
+    });
+  }
+
+  // ---------- Compass ----------
+  let compassOn = false;
+  function onOrient(e) {
+    let h = null;
+    if (typeof e.webkitCompassHeading === 'number') h = e.webkitCompassHeading;       // iOS
+    else if (e.absolute && typeof e.alpha === 'number') h = (360 - e.alpha) % 360;    // Android absolute
+    if (h == null) return;
+    // compensate for landscape orientation
+    const so = (screen.orientation?.angle ?? window.orientation ?? 0);
+    h = (h + so + 360) % 360;
+    S.heading = h;
+    $('needle').style.transform = `rotate(${-h}deg)`;
+    $('compass').classList.remove('off');
+    if (S.aim) { clearTimeout(onOrient._t); onOrient._t = setTimeout(applyFilter, 400); }
+  }
+  async function enableCompass() {
+    if (compassOn) return;
+    try {
+      if (typeof DeviceOrientationEvent !== 'undefined' && typeof DeviceOrientationEvent.requestPermission === 'function') {
+        const r = await DeviceOrientationEvent.requestPermission(); if (r !== 'granted') throw new Error(r);
+      }
+      const evt = 'ondeviceorientationabsolute' in window ? 'deviceorientationabsolute' : 'deviceorientation';
+      window.addEventListener(evt, onOrient, true); compassOn = true;
+    } catch (e) { toast('Compass not available here'); }
+  }
+  $('compass').onclick = enableCompass;
+
+  // ---------- Controls ----------
+  $('radii').addEventListener('click', e => {
+    const b = e.target.closest('.pill'); if (!b) return;
+    $('radii').querySelectorAll('.pill').forEach(p => p.classList.toggle('on', p === b));
+    S.radius = +b.dataset.r; if (S.lat != null) loadLocation(S.lat, S.lon, S.placeName);
+  });
+  $('aim').onclick = async () => {
+    if (!compassOn) await enableCompass();
+    if (S.heading == null) { toast('Aim needs a compass — try on your phone'); return; }
+    S.aim = !S.aim; $('aim').classList.toggle('on', S.aim); applyFilter();
+    toast(S.aim ? 'Showing only what\'s in front of you' : 'Showing everything nearby');
+  };
+  $('relocate').onclick = async () => {
+    try { toast('Locating…'); const c = await locate(); loadLocation(c.latitude, c.longitude, ''); }
+    catch { toast('Location unavailable'); }
+  };
+
+  // ---------- Start sheet ----------
+  async function begin({ lat, lon, name } = {}) {
+    $('sheet').classList.add('hide');
+    startCamera().then(ok => { if (!ok) toast('No camera — showing archive only'); if (S.idx < 0) showNow(); });
+    enableCompass();
+    if (lat != null) return loadLocation(lat, lon, name);
+    try { const c = await locate(); loadLocation(c.latitude, c.longitude, ''); }
+    catch (e) { toast('Location denied — pick a place instead', 3500); $('sheet').classList.remove('hide'); }
+  }
+  $('start').onclick = () => begin();
+  $('go').onclick = async () => {
+    const q = $('q').value.trim(); if (!q) return;
+    $('go').textContent = '…';
+    try { const g = await geocode(q); if (!g) return toast(`Couldn't find “${q}”`); begin(g); }
+    catch { toast('Search failed'); } finally { $('go').textContent = 'Go'; }
+  };
+  $('q').addEventListener('keydown', e => { if (e.key === 'Enter') $('go').click(); });
+  document.querySelectorAll('.demos .pill').forEach(b => b.onclick = () => {
+    const [lat, lon, ...n] = b.dataset.ll.split(','); begin({ lat: +lat, lon: +lon, name: n.join(',') });
+  });
+
+  // Keep video alive when returning to tab
+  document.addEventListener('visibilitychange', () => { if (!document.hidden && S.stream) cam.play().catch(() => {}); });
+})();
+</script>
+</body>
+</html>
