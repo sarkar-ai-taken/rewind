@@ -265,13 +265,23 @@
   }
 
   async function fetchPhotos(lat, lon, radius) {
-    const j = await wm('commons.wikimedia.org', {
+    const base = {
       action: 'query', generator: 'geosearch', ggscoord: `${lat}|${lon}`, ggsradius: Math.min(radius, 10000),
       ggslimit: 50, ggsnamespace: 6, ggsprop: 'type|name',
       prop: 'imageinfo|coordinates', iiprop: 'url|extmetadata|timestamp|mime', iiurlwidth: Math.min(1600, Math.round(window.innerWidth * devicePixelRatio * 1.2)),
       iiextmetadatafilter: 'DateTimeOriginal|DateTime|ImageDescription|Artist|LicenseShortName|Credit',
-    });
-    const pages = Object.values(j.query?.pages || {});
+    };
+    // The API truncates imageinfo on big responses and hands back a `continue` token — follow it and merge.
+    const merged = {}; let cont = {};
+    for (let i = 0; i < 6; i++) {
+      const j = await wm('commons.wikimedia.org', { ...base, ...cont });
+      for (const [id, p] of Object.entries(j.query?.pages || {})) {
+        const m = merged[id] || (merged[id] = {});
+        Object.assign(m, p, { imageinfo: p.imageinfo || m.imageinfo, coordinates: p.coordinates || m.coordinates });
+      }
+      if (!j.continue) break; cont = j.continue;
+    }
+    const pages = Object.values(merged);
     const out = [];
     for (const p of pages) {
       const ii = p.imageinfo?.[0]; if (!ii || !/^image\/(jpeg|png|webp|gif)/.test(ii.mime || '')) continue;
@@ -282,7 +292,7 @@
         title: (p.title || '').replace(/^File:/, '').replace(/\.[a-z]+$/i, '').replace(/_/g, ' '),
         url: ii.thumburl || ii.url, page: ii.descriptionurl,
         year: y.year, circa: y.circa, dateLabel: y.label,
-        desc: stripHtml(meta.ImageDescription?.value).slice(0, 220),
+        desc: stripHtml(meta.ImageDescription?.value).replace(/https?:\/\/\S+/g, '').replace(/\s{2,}/g, ' ').trim().slice(0, 220),
         artist: stripHtml(meta.Artist?.value).slice(0, 60),
         license: stripHtml(meta.LicenseShortName?.value),
         lat: c?.lat, lon: c?.lon,
